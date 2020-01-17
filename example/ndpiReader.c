@@ -21,9 +21,7 @@
 #include "ndpi_config.h"
 
 #ifdef linux
-#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
-#endif
 #include <sched.h>
 #endif
 #include <stdio.h>
@@ -56,8 +54,25 @@
 
 #include "reader_util.h"
 #include "intrusion_detection.h"
+#include "pinlab_s7.h"
 
+FILE *fp;
+  int counter=1;
+/** statistics structure **/
+typedef struct _s7_count_struct_ {
+  int counter_reqSZL_req;
+  int counter_readClock_req;
+  int counter_msgService_req;
+  int counter_reqSZL_res;
+  int counter_readClock_res;
+  int counter_msgService_res;
+  int counter_setupComm;
+  u_int8_t src_ip_request[4];
+  u_int8_t src_ip_response[4];
+} s7_count_struct;
 
+static s7_count_struct s7_counter;
+//
 /** Client parameters **/
 
 static char *_pcap_file[MAX_NUM_READER_THREADS]; /**< Ingress pcap file/interfaces */
@@ -604,7 +619,7 @@ void printCSVHeader() {
   fprintf(csv_fp, "client_info,server_info,");
   fprintf(csv_fp, "tls_version,ja3c,tls_client_unsafe,");
   fprintf(csv_fp, "ja3s,tls_server_unsafe,");
-  fprintf(csv_fp, "ssh_client_hassh,ssh_server_hassh,flow_info");
+  fprintf(csv_fp, "ssh_client_hassh,ssh_server_hassh");
 
   /* Joy */
   if(enable_joy_stats) {
@@ -1084,9 +1099,9 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
    /* TCP window */
    fprintf(csv_fp, "%u,%u,", flow->c_to_s_init_win, flow->s_to_c_init_win);
 
-    fprintf(csv_fp, "%s,%s,",
-	    (flow->ssh_tls.client_requested_server_name[0] != '\0')  ? flow->ssh_tls.client_requested_server_name : "",
-	    (flow->ssh_tls.server_info[0] != '\0')  ? flow->ssh_tls.server_info : "");
+    // fprintf(csv_fp, "%s,%s,",
+	  //   (flow->ssh_tls.client_info[0] != '\0')  ? flow->ssh_tls.client_info : "",
+	  //   (flow->ssh_tls.server_info[0] != '\0')  ? flow->ssh_tls.server_info : "");
 
     fprintf(csv_fp, "%s,%s,%s,",
 	    (flow->ssh_tls.ssl_version != 0)        ? ndpi_ssl_version2str(flow->ssh_tls.ssl_version, &known_tls) : "0",
@@ -1101,8 +1116,6 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
 	    (flow->ssh_tls.client_hassh[0] != '\0') ? flow->ssh_tls.client_hassh : "",
 	    (flow->ssh_tls.server_hassh[0] != '\0') ? flow->ssh_tls.server_hassh : ""
 	    );
-
-    fprintf(csv_fp, ",%s", flow->info);
   }
 
   if((verbose != 1) && (verbose != 2)) {
@@ -1178,7 +1191,6 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
   if(flow->host_server_name[0] != '\0') fprintf(out, "[Host: %s]", flow->host_server_name);
 
   if(flow->info[0] != '\0') fprintf(out, "[%s]", flow->info);
-  if(flow->flow_extra_info[0] != '\0') fprintf(out, "[%s]", flow->flow_extra_info);
 
   if((flow->src2dst_packets+flow->dst2src_packets) > 5) {
     if(flow->iat_c_to_s && flow->iat_s_to_c) {
@@ -1210,15 +1222,13 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
 	    flow->http.content_type, flow->http.user_agent);
 
   if(flow->ssh_tls.ssl_version != 0) fprintf(out, "[%s]", ndpi_ssl_version2str(flow->ssh_tls.ssl_version, &known_tls));
-  if(flow->ssh_tls.client_requested_server_name[0] != '\0') fprintf(out, "[Client: %s]", flow->ssh_tls.client_requested_server_name);
+  //if(flow->ssh_tls.client_info[0] != '\0') fprintf(out, "[Client: %s]", flow->ssh_tls.client_info);
   if(flow->ssh_tls.client_hassh[0] != '\0') fprintf(out, "[HASSH-C: %s]", flow->ssh_tls.client_hassh);
 
   if(flow->ssh_tls.ja3_client[0] != '\0') fprintf(out, "[JA3C: %s%s]", flow->ssh_tls.ja3_client,
 						  print_cipher(flow->ssh_tls.client_unsafe_cipher));
 
   if(flow->ssh_tls.server_info[0] != '\0') fprintf(out, "[Server: %s]", flow->ssh_tls.server_info);
-
-  if(flow->ssh_tls.server_names) fprintf(out, "[ServerNames: %s]", flow->ssh_tls.server_names);
   if(flow->ssh_tls.server_hassh[0] != '\0') fprintf(out, "[HASSH-S: %s]", flow->ssh_tls.server_hassh);
 
   if(flow->ssh_tls.ja3_server[0] != '\0') fprintf(out, "[JA3S: %s%s]", flow->ssh_tls.ja3_server,
@@ -1227,7 +1237,11 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
 
   if((flow->detected_protocol.master_protocol == NDPI_PROTOCOL_TLS)
      || (flow->detected_protocol.app_protocol == NDPI_PROTOCOL_TLS)) {
-    if(flow->ssh_tls.sha1_cert_fingerprint_set) {
+    if((flow->ssh_tls.sha1_cert_fingerprint[0] == 0)
+       && (flow->ssh_tls.sha1_cert_fingerprint[1] == 0)
+       && (flow->ssh_tls.sha1_cert_fingerprint[2] == 0))
+      ; /* Looks empty */
+    else {
       fprintf(out, "[Certificate SHA-1: ");
       for(i=0; i<20; i++)
 	fprintf(out, "%s%02X", (i > 0) ? ":" : "",
@@ -2052,7 +2066,7 @@ static void printFlowsStats() {
 	    newHost->host_server_info_hasht = NULL;
 	    newHost->ip_string = all_flows[i].flow->src_name;
 	    newHost->ip = all_flows[i].flow->src_ip;
-	    newHost->dns_name = all_flows[i].flow->ssh_tls.client_requested_server_name;
+	    //newHost->dns_name = all_flows[i].flow->ssh_tls.client_info;
 
 	    ndpi_ja3_info *newJA3 = malloc(sizeof(ndpi_ja3_info));
 	    newJA3->ja3 = all_flows[i].flow->ssh_tls.ja3_client;
@@ -2085,7 +2099,7 @@ static void printFlowsStats() {
 
 	    newHost->ip = all_flows[i].flow->src_ip;
 	    newHost->ip_string = all_flows[i].flow->src_name;
-	    newHost->dns_name = all_flows[i].flow->ssh_tls.client_requested_server_name;;
+	    //newHost->dns_name = all_flows[i].flow->ssh_tls.client_info;;
 
 	    ndpi_ja3_fingerprints_host *newElement = malloc(sizeof(ndpi_ja3_fingerprints_host));
 	    newElement->ja3 = all_flows[i].flow->ssh_tls.ja3_client;
@@ -2102,7 +2116,7 @@ static void printFlowsStats() {
 	      ndpi_ip_dns *newInnerElement = malloc(sizeof(ndpi_ip_dns));
 	      newInnerElement->ip = all_flows[i].flow->src_ip;
 	      newInnerElement->ip_string = all_flows[i].flow->src_name;
-	      newInnerElement->dns_name = all_flows[i].flow->ssh_tls.client_requested_server_name;
+	      //newInnerElement->dns_name = all_flows[i].flow->ssh_tls.client_info;
 	      HASH_ADD_INT(hostByJA3Found->ipToDNS_ht, ip, newInnerElement);
 	    }
 	  }
@@ -2520,46 +2534,82 @@ static void printResults(u_int64_t processing_time_usec, u_int64_t setup_time_us
       if(enable_protocol_guess)
 	printf("\tGuessed flow protos:   %-13u\n", cumulative_stats.guessed_flow_protocols);
   }
+  
+  printf("\nDetected S7 packets: %d\n", s7_counter.counter_reqSZL_req + s7_counter.counter_reqSZL_res + s7_counter.counter_msgService_req + s7_counter.counter_msgService_res + s7_counter.counter_readClock_req + s7_counter.counter_readClock_res + s7_counter.counter_setupComm);
 
+  if(s7_counter.counter_reqSZL_req > 0)
+  printf("From: %d.%d.%d.%d / Request Response / Read SZL / Request: \t\t\t %d\n",
+            s7_counter.src_ip_request[0], s7_counter.src_ip_request[1], s7_counter.src_ip_request[2], s7_counter.src_ip_request[3],
+            s7_counter.counter_reqSZL_req);
 
-  if(!quiet_mode) printf("\n\nDetected protocols:\n");
-  for(i = 0; i <= ndpi_get_num_supported_protocols(ndpi_thread_info[0].workflow->ndpi_struct); i++) {
-    ndpi_protocol_breed_t breed = ndpi_get_proto_breed(ndpi_thread_info[0].workflow->ndpi_struct, i);
+  if(s7_counter.counter_readClock_req > 0)
+  printf("From: %d.%d.%d.%d / Request Response / Read Clock / Request: \t\t\t %d\n",
+            s7_counter.src_ip_request[0], s7_counter.src_ip_request[1], s7_counter.src_ip_request[2], s7_counter.src_ip_request[3],
+            s7_counter.counter_readClock_req);
 
-    if(cumulative_stats.protocol_counter[i] > 0) {
-      breed_stats[breed] += (long long unsigned int)cumulative_stats.protocol_counter_bytes[i];
+  if(s7_counter.counter_msgService_req > 0)
+  printf("From: %d.%d.%d.%d / Request Response / Message Service / Request: \t\t %d\n",
+            s7_counter.src_ip_request[0], s7_counter.src_ip_request[1], s7_counter.src_ip_request[2], s7_counter.src_ip_request[3],
+            s7_counter.counter_msgService_req);
 
-      if(results_file)
-	fprintf(results_file, "%s\t%llu\t%llu\t%u\n",
-		ndpi_get_proto_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
-		(long long unsigned int)cumulative_stats.protocol_counter[i],
-		(long long unsigned int)cumulative_stats.protocol_counter_bytes[i],
-		cumulative_stats.protocol_flows[i]);
+  if(s7_counter.counter_reqSZL_res > 0)
+  printf("From: %d.%d.%d.%d / Request Response / Read SZL / Response: \t\t\t %d\n",
+            s7_counter.src_ip_response[0], s7_counter.src_ip_response[1], s7_counter.src_ip_response[2], s7_counter.src_ip_response[3],
+            s7_counter.counter_reqSZL_res);
 
-      if((!quiet_mode)) {
-	printf("\t%-20s packets: %-13llu bytes: %-13llu "
-	       "flows: %-13u\n",
-	       ndpi_get_proto_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
-	       (long long unsigned int)cumulative_stats.protocol_counter[i],
-	       (long long unsigned int)cumulative_stats.protocol_counter_bytes[i],
-	       cumulative_stats.protocol_flows[i]);
-      }
+  if(s7_counter.counter_readClock_res > 0)
+  printf("From: %d.%d.%d.%d / Request Response / Read Clock / Response: \t\t\t %d\n",
+            s7_counter.src_ip_response[0], s7_counter.src_ip_response[1], s7_counter.src_ip_response[2], s7_counter.src_ip_response[3],
+            s7_counter.counter_readClock_res);
 
-      total_flow_bytes += cumulative_stats.protocol_counter_bytes[i];
-    }
-  }
+  if(s7_counter.counter_readClock_res > 0)
+  printf("From: %d.%d.%d.%d / Request Response / Message Service / Response: \t\t %d\n",
+            s7_counter.src_ip_response[0], s7_counter.src_ip_response[1], s7_counter.src_ip_response[2], s7_counter.src_ip_response[3],
+            s7_counter.counter_readClock_res);
 
-  if((!quiet_mode)) {
-    printf("\n\nProtocol statistics:\n");
+  if(s7_counter.counter_setupComm > 0)
+  printf("From: %d.%d.%d.%d / Setup communication: \t\t\t\t\t %d\n",
+            s7_counter.src_ip_response[0], s7_counter.src_ip_response[1], s7_counter.src_ip_response[2], s7_counter.src_ip_response[3],
+            s7_counter.counter_setupComm);
 
-    for(i=0; i < NUM_BREEDS; i++) {
-      if(breed_stats[i] > 0) {
-	printf("\t%-20s %13llu bytes\n",
-	       ndpi_get_proto_breed_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
-	       breed_stats[i]);
-      }
-    }
-  }
+  // if(!quiet_mode) printf("\n\nDetected protocols:\n");
+  // for(i = 0; i <= ndpi_get_num_supported_protocols(ndpi_thread_info[0].workflow->ndpi_struct); i++) {
+  //   ndpi_protocol_breed_t breed = ndpi_get_proto_breed(ndpi_thread_info[0].workflow->ndpi_struct, i);
+
+  //   if(cumulative_stats.protocol_counter[i] > 0) {
+  //     breed_stats[breed] += (long long unsigned int)cumulative_stats.protocol_counter_bytes[i];
+
+  //     if(results_file)
+	// fprintf(results_file, "%s\t%llu\t%llu\t%u\n",
+	// 	ndpi_get_proto_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
+	// 	(long long unsigned int)cumulative_stats.protocol_counter[i],
+	// 	(long long unsigned int)cumulative_stats.protocol_counter_bytes[i],
+	// 	cumulative_stats.protocol_flows[i]);
+
+  //     if((!quiet_mode)) {
+	// printf("\t%-20s packets: %-13llu bytes: %-13llu "
+	//        "flows: %-13u\n",
+	//        ndpi_get_proto_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
+	//        (long long unsigned int)cumulative_stats.protocol_counter[i],
+	//        (long long unsigned int)cumulative_stats.protocol_counter_bytes[i],
+	//        cumulative_stats.protocol_flows[i]);
+  //     }
+
+  //     total_flow_bytes += cumulative_stats.protocol_counter_bytes[i];
+  //   }
+  // }
+
+  // if((!quiet_mode)) {
+  //   printf("\n\nProtocol statistics:\n");
+
+  //   for(i=0; i < NUM_BREEDS; i++) {
+  //     if(breed_stats[i] > 0) {
+	// printf("\t%-20s %13llu bytes\n",
+	//        ndpi_get_proto_breed_name(ndpi_thread_info[0].workflow->ndpi_struct, i),
+	//        breed_stats[i]);
+  //     }
+  //   }
+  // }
 
   // printf("\n\nTotal Flow Traffic: %llu (diff: %llu)\n", total_flow_bytes, cumulative_stats.total_ip_bytes-total_flow_bytes);
 
@@ -2698,7 +2748,6 @@ static pcap_t * openPcapFileOrDevice(u_int16_t thread_id, const u_char * pcap_fi
   if(dpdk_port_init(dpdk_port_id, mbuf_pool) != 0)
     rte_exit(EXIT_FAILURE, "DPDK: Cannot init port %u: please see README.dpdk\n", dpdk_port_id);
 #else
-  /* Trying to open the interface */
   if((pcap_handle = pcap_open_live((char*)pcap_file, snaplen,
 				   promisc, 500, pcap_error_buffer)) == NULL) {
     capture_for = capture_until = 0;
@@ -2706,18 +2755,15 @@ static pcap_t * openPcapFileOrDevice(u_int16_t thread_id, const u_char * pcap_fi
     live_capture = 0;
     num_threads = 1; /* Open pcap files in single threads mode */
 
-    /* Trying to open a pcap file */
+    /* trying to open a pcap file */
     if((pcap_handle = pcap_open_offline((char*)pcap_file, pcap_error_buffer)) == NULL) {
       char filename[256] = { 0 };
 
       if(strstr((char*)pcap_file, (char*)".pcap"))
 	printf("ERROR: could not open pcap file %s: %s\n", pcap_file, pcap_error_buffer);
-
-      /* Trying to open as a playlist as last attempt */
       else if((getNextPcapFileFromPlaylist(thread_id, filename, sizeof(filename)) != 0)
 	      || ((pcap_handle = pcap_open_offline(filename, pcap_error_buffer)) == NULL)) {
-        /* This probably was a bad interface name, printing a generic error */
-        printf("ERROR: could not open %s: %s\n", filename, pcap_error_buffer);
+        printf("ERROR: could not open playlist %s: %s\n", filename, pcap_error_buffer);
         exit(-1);
       } else {
         if((!quiet_mode))
@@ -2763,12 +2809,275 @@ static void ndpi_process_packet(u_char *args,
 				const u_char *packet) {
   struct ndpi_proto p;
   u_int16_t thread_id = *((u_int16_t*)args);
+  int payload_offset = 54;
+  int tpkt_offset = 4;
+  int cotp_offset = 3;
+  int s7_header_offset = 10;
+  int param_offset = payload_offset + tpkt_offset + cotp_offset + s7_header_offset;
+
+  int s7id=0;
+  int s7index=0;
+  int s7data_len=0;
+  int s7data_offset=param_offset+12;
+  int ROSCTR_offset=payload_offset+tpkt_offset+cotp_offset+1;
+  
+  char job[]="Job Request";
+  char ack[] = "Ack";
+  char Ack_data[]="Ack-Data";
+  char ud[]="Userdata";
 
   /* allocate an exact size buffer to check overflows */
   uint8_t *packet_checked = malloc(header->caplen);
 
   memcpy(packet_checked, packet, header->caplen);
   p = ndpi_workflow_process_packet(ndpi_thread_info[thread_id].workflow, header, packet_checked);
+
+  
+  // printf("Found a Packet / Count: %d\n", ++s7_counter.counter_reqSZL);
+  // for(int i=0; i < header->caplen; i++) {
+  //   printf("%02X ", packet_checked[i]);
+  // }
+  // printf("\n\n\n");
+
+  if(packet_checked[payload_offset + 0] == 0x03 && 
+    packet_checked[payload_offset + 1] == 0x00 &&
+    packet_checked[payload_offset + 4] == 0x02 &&
+    packet_checked[payload_offset + 5] == 0xF0 &&
+    packet_checked[payload_offset + 6] == 0x80 &&
+    packet_checked[payload_offset + 7] == 0x32 &&
+    header->caplen >= param_offset + 8) {
+      // found s7 protocol
+      if(counter==1){
+      	fp=fopen("/home/in/Desktop/packet_read.txt", "w");
+      }
+      else if(counter!=1){
+	fp=fopen("/home/in/Desktop/packet_read.txt", "a");
+      }
+      if(fp==NULL){
+        printf("fail-exit");
+        return ;
+      }
+
+      fprintf(fp, "==========packet %d==========\n\n", counter);
+      counter++;
+      fprintf(fp,"<<TPKT>>\n\n");
+      fprintf(fp, "Version: 0x%.2x\n", packet_checked[payload_offset + 0]);
+      fprintf(fp, "Reserved: 0x%.2x\n", packet_checked[payload_offset + 1]);
+      fprintf(fp, "Length(COTP+S7): 0x%.2x%.2x\n\n", packet_checked[payload_offset + 2],packet_checked[payload_offset + 3]);
+      fprintf(fp, "<<COTP>>\n\n");
+      fprintf(fp, "COTP Length: 0x%.2x\n",  packet_checked[payload_offset + 4]);
+      fprintf(fp, "PDU Type: 0x%.2x\n",  packet_checked[payload_offset + 5]);
+      fprintf(fp, "Flag: 0x%.2X\n\n",  packet_checked[payload_offset + 6]);
+      fprintf(fp, "<<S7 Header>>\n\n");
+      fprintf(fp, "Protocol ID: 0x%.2x\n", packet_checked[payload_offset + 7]);
+
+      if(packet_checked[payload_offset+8]==0x01) 
+        fprintf(fp, "ROSCTR: 0x%.2x (%s)\n", packet_checked[payload_offset + 8], job);
+      else if(packet_checked[payload_offset+8]==0x02){
+         fprintf(fp, "ROSCTR: 0x%.2x (%s)\n", packet_checked[payload_offset + 8], ack);       
+      }
+      else if(packet_checked[payload_offset+8]==0x03){
+         fprintf(fp, "ROSCTR: 0x%.2x (%s)\n", packet_checked[payload_offset + 8], Ack_data);       
+      }
+      else if(packet_checked[payload_offset+8]==0x07){
+         fprintf(fp, "ROSCTR: 0x%.2x (%s)\n", packet_checked[payload_offset + 8], ud);       
+      }
+      fprintf(fp, "Reserved: 0x%.2x%.2x\n", packet_checked[payload_offset +9],packet_checked[payload_offset +10]);
+      fprintf(fp, "PDU Reference (Msg ID): 0x%.2x%.2x\n", packet_checked[payload_offset +11],packet_checked[payload_offset +12]);
+      fprintf(fp, "Parameter Length: 0x%.2x%.2x\n", packet_checked[payload_offset +13],packet_checked[payload_offset +14]);
+      fprintf(fp, "Data Length: 0x%.2x%.2x\n\n",packet_checked[payload_offset +15], packet_checked[payload_offset +16]);
+      
+      //Job
+      if(packet_checked[payload_offset+8]==0x01){
+        fprintf(fp, "<<Parameter>>\n\n");
+        if(packet_checked[payload_offset+17]==0xf0){
+          fprintf(fp, "Function: 0x%.2x (Setup communication)\n", packet_checked[payload_offset+17]);
+        }
+        else{
+          fprintf(fp, "Function: 0x%.2x\n ", packet_checked[payload_offset+17]);
+        }
+        fprintf(fp, "Reserved: 0x%.2x\n", packet_checked[payload_offset+18]);
+        fprintf(fp, "Max AmQ (parallel jobs with ack) calling: 0x%.2x%.2x\n",packet_checked[payload_offset+19],packet_checked[payload_offset+20]);
+        fprintf(fp, "Max AmQ (parallel jobs with ack) called: 0x%.2x%.2x\n", packet_checked[payload_offset+21],packet_checked[payload_offset+22]);
+        fprintf(fp, "PDU length: 0x%.2x%.2x\n\n",packet_checked[payload_offset+23],packet_checked[payload_offset+24]);
+      }      
+      //Ack_data
+      else if(packet_checked[payload_offset+8]==0x03){
+        if(packet_checked[payload_offset +17]==0x00){
+          fprintf(fp, "Error class: 0x%.2x (No error)\n",packet_checked[payload_offset +17]);
+          fprintf(fp, "Error Code: 0x%.2x \n\n",packet_checked[payload_offset+18]);
+        }
+        else{
+          fprintf(fp, "Error class: 0x%.2x (error)\n",packet_checked[payload_offset +17]);
+          fprintf(fp, "Error Code: 0x%.2x \n\n",packet_checked[payload_offset+18]);
+        }
+        
+        fprintf(fp, "<<Parameter>>\n\n");
+        if(packet_checked[payload_offset+18]==0xf0){
+          fprintf(fp, "Function: 0x%.2x (Setup communication)\n", packet_checked[payload_offset+18]);
+        }
+        else{
+          fprintf(fp, "Function: 0x%.2x\n ", packet_checked[payload_offset+18]);
+        }
+        fprintf(fp, "Reserved: 0x%.2x\n", packet_checked[payload_offset+19]);
+        fprintf(fp, "Max AmQ (parallel jobs with ack) calling: 0x%.2x%.2x\n",packet_checked[payload_offset+20],packet_checked[payload_offset+21]);
+        fprintf(fp, "Max AmQ (parallel jobs with ack) called: 0x%.2x%.2x\n", packet_checked[payload_offset+22],packet_checked[payload_offset+23]);
+        fprintf(fp, "PDU length: 0x%.2x%.2x\n\n",packet_checked[payload_offset+24],packet_checked[payload_offset+25]);
+      }
+      //UserData
+      else{//
+        fprintf(fp,"<<parameter>>\n\n");
+        fprintf(fp, "Parameter head: 0x%.2x%.2x%.2x\n", packet_checked[payload_offset+17],packet_checked[payload_offset+18],packet_checked[payload_offset+19]);
+        fprintf(fp, "parameter Length: 0x%.2x\n",packet_checked[payload_offset+20]);
+        if(packet_checked[payload_offset+21]==0x11){
+          fprintf(fp, "Method: 0x%.2x (Request)\n", packet_checked[payload_offset+21]);
+        }
+        else if(packet_checked[payload_offset+21]==0x12){
+          fprintf(fp, "Method: 0x%.2x (Response)\n",packet_checked[payload_offset+21]);
+        }
+        else{
+          fprintf(fp, "Method: 0x%.2x \n",packet_checked[payload_offset+21]);
+        }
+        if(packet_checked[payload_offset+22]==0x44){
+          fprintf(fp, "Type: Request (4)\nFuncstion group: CPU functions (4)\n");
+        }
+        else if(packet_checked[payload_offset+22]==0x84){
+          fprintf(fp, "Type: Response (8)\nFuncstion group: CPU functions (4)\n");
+        }
+		if(packet_checked[payload_offset+23]==0x01){
+			fprintf(fp,"Subfunction: 0x%.2x (Read SZL)\n", packet_checked[payload_offset+23]);
+		}
+		else if(packet_checked[payload_offset+23]==0x02){
+			fprintf(fp, "subfunction: 0x%.2x (Message Service)\n",packet_checked[payload_offset+23]);
+		}
+        if(packet_checked[payload_offset+24]==0x00){
+          fprintf(fp,"Sequence number: 0x%.2x\n\n",packet_checked[payload_offset+24]);
+          fprintf(fp,"<<Data>>\n\n");
+          if(packet_checked[payload_offset+25]==0xff){
+            fprintf(fp, "Return Code: 0x%.2x (Success)\n",packet_checked[payload_offset+25]);
+          }
+          else{
+            fprintf(fp, "Return Code: 0x%.2x \n",packet_checked[payload_offset+25]);
+          }
+          if(packet_checked[payload_offset+26]==0x09){
+            fprintf(fp, "Transport size: 0x%.2x (OCTET STRING)\n", packet_checked[payload_offset+26]);
+          }
+          else{
+            fprintf(fp, "Transport size: 0x%.2x\n",packet_checked[payload_offset+26]);
+          }
+          fprintf(fp, "Data Length: 0x%.2x%.2x\n",packet_checked[payload_offset+27],packet_checked[payload_offset+28]);
+        }
+        else{
+          fprintf(fp,"Sequence number: 0x%.2x\n",packet_checked[payload_offset+24]);
+          fprintf(fp, "Data unit reference number: 0x%.2x\n",packet_checked[payload_offset+25]);
+          if(packet_checked[payload_offset+26]==0x00){
+            fprintf(fp, "Last data unit: 0x%.2x (YES)\n",packet_checked[payload_offset+26]);
+          }
+          else{
+            fprintf(fp, "Last data unit: 0x%.2x \n",packet_checked[payload_offset+26]);
+          }
+          if(packet_checked[payload_offset+27]==0x00&&packet_checked[payload_offset+28]==0x00){
+            fprintf(fp, "Error code: 0x%.2x%.2x (No error)\n",packet_checked[payload_offset+27],packet_checked[payload_offset+28]);
+
+          }
+          else{
+            fprintf(fp, "Error code: 0x%.2x%.2x (error)\n",packet_checked[payload_offset+27],packet_checked[payload_offset+28]);
+          }
+          if(packet_checked[payload_offset+29]==0xff){
+            fprintf(fp, "Return Code: 0x%.2x (Success)\n",packet_checked[payload_offset+29]);
+          }
+          else if(packet_checked[payload_offset+29]==0x0a){
+			fprintf(fp, "Return Code: 0x%.2x (Object does not exist)\n",packet_checked[payload_offset+29]);
+		  }
+          else{
+            fprintf(fp, "Return Code: 0x%.2x \n",packet_checked[payload_offset+29]);
+          }
+          if(packet_checked[payload_offset+30]==0x09){
+            fprintf(fp, "Transport size: 0x%.2x (OCTET STRING)\n", packet_checked[payload_offset+30]);
+          }
+          else{
+            fprintf(fp, "Transport size: 0x%.2x\n",packet_checked[payload_offset+30]);
+          }
+          fprintf(fp, "Data Length: 0x%.2x%.2x\n\n",packet_checked[payload_offset+31],packet_checked[payload_offset+32]);
+        }
+
+        if(packet_checked[payload_offset+tpkt_offset+cotp_offset+s7_header_offset+4]==0x12){
+          //printf("--- Detection s7 Response (packet num : %d) ---\n",pkcount);
+          if(((packet_checked[payload_offset+tpkt_offset+cotp_offset+s7_header_offset+5]&0x0f)==0x04)&&
+              (packet_checked[payload_offset+tpkt_offset+cotp_offset+s7_header_offset+6]==0x01)){
+                fprintf(fp, "<Bit_analysis>\n");
+                
+                s7id=(packet_checked[s7data_offset+4]<<8);
+                s7id+=packet_checked[s7data_offset+5];
+                s7index=(packet_checked[s7data_offset+6]<<8);
+                s7index+=packet_checked[s7data_offset+7];
+
+                s7data_len=header->caplen-(s7data_offset);
+
+                fprintf(fp, "ID = 0x%.4x, Index = 0x%.4x\n\n",s7id,s7index);
+                bit_analysis(packet_checked+s7data_offset,s7data_len,s7id,s7index,fp);
+              }else{
+            //other Response function
+          }
+        }
+      }//
+           int s7_all = s7_counter.counter_reqSZL_req + s7_counter.counter_readClock_req + s7_counter.counter_msgService_req
+                    + s7_counter.counter_reqSZL_res + s7_counter.counter_readClock_res + s7_counter.counter_msgService_res + s7_counter.counter_setupComm + 1;
+      printf("Found a S7 Packet / Count: %d\n", s7_all);
+      fclose(fp);
+      u_int8_t func_group = packet_checked[param_offset + 5] & 0b00001111;
+      u_int8_t subfunction = packet_checked[param_offset + 6];
+
+      if(packet_checked[param_offset + 4] == 0x11) {
+        // request
+        for(int i = 0; i < 4; i++) {
+          s7_counter.src_ip_request[i] = packet_checked[26 + i];
+        }
+
+        if (func_group == 0b0100) {
+          // cpu functions
+          if(subfunction == 0x01) {
+            s7_counter.counter_reqSZL_req++;
+            printf("Found: Request / Request SZL\n\n");
+          } else if (subfunction == 0x02) {
+            s7_counter.counter_msgService_req++;
+            printf("Found: Request / Message service\n\n");
+          }
+        } else if (func_group == 0b0111) {
+          // time functions
+          if(subfunction == 0x01) {
+            s7_counter.counter_readClock_req++;
+            printf("Found: Request / Read Clock\n\n");
+          }
+        }
+      } else if (packet_checked[param_offset + 4] == 0x12) {
+        // response
+        for(int i = 0; i < 4; i++) {
+          s7_counter.src_ip_response[i] = packet_checked[26 + i];
+        }
+
+        if (func_group == 0b0100) {
+          // cpu functions
+          if(subfunction == 0x01) {
+            s7_counter.counter_reqSZL_res++;
+            printf("Found: Response / Request SZL\n\n");
+          } else if (subfunction == 0x02) {
+            s7_counter.counter_msgService_res++;
+            printf("Found: Response / Message service\n\n");
+          }
+        } else if (func_group == 0b0111) {
+          if(subfunction == 0x01) {
+            s7_counter.counter_readClock_res++;
+            printf("Found: Response / Read Clock\n\n");
+          }
+        }
+      }else if((packet_checked[ROSCTR_offset]==0x01)||(packet_checked[ROSCTR_offset]==0x03)){
+        s7_counter.counter_setupComm++;
+        printf("Found: Setup communication\n\n");
+      }
+      // s7_counter.counter_reqSZL++;
+
+    }
 
   if(!pcap_start.tv_sec) pcap_start.tv_sec = header->ts.tv_sec, pcap_start.tv_usec = header->ts.tv_usec;
   pcap_end.tv_sec = header->ts.tv_sec, pcap_end.tv_usec = header->ts.tv_usec;
@@ -2879,8 +3188,7 @@ static void ndpi_process_packet(u_char *args,
  */
 static void runPcapLoop(u_int16_t thread_id) {
   if((!shutdown_app) && (ndpi_thread_info[thread_id].workflow->pcap_handle != NULL))
-    if(pcap_loop(ndpi_thread_info[thread_id].workflow->pcap_handle, -1, &ndpi_process_packet, (u_char*)&thread_id) < 0)
-      printf("Error while reading pcap file: '%s'\n", pcap_geterr(ndpi_thread_info[thread_id].workflow->pcap_handle));
+    pcap_loop(ndpi_thread_info[thread_id].workflow->pcap_handle, -1, &ndpi_process_packet, (u_char*)&thread_id);
 }
 
 /**
@@ -3228,6 +3536,15 @@ int orginal_main(int argc, char **argv) {
 #endif
     int i;
 
+    s7_counter.counter_reqSZL_req = 0;
+    s7_counter.counter_readClock_req = 0;
+    s7_counter.counter_msgService_req = 0;
+
+    s7_counter.counter_reqSZL_res = 0;
+    s7_counter.counter_readClock_res = 0;
+    s7_counter.counter_msgService_res = 0;
+    s7_counter.counter_setupComm = 0;
+
     if(ndpi_get_api_version() != NDPI_API_VERSION) {
       printf("nDPI Library version mismatch: please make sure this code and the nDPI library are in sync\n");
       return(-1);
@@ -3248,14 +3565,14 @@ int orginal_main(int argc, char **argv) {
     parseOptions(argc, argv);
 
     if(!quiet_mode) {
-      printf("\n-----------------------------------------------------------\n"
-	     "* NOTE: This is demo app to show *some* nDPI features.\n"
-	     "* In this demo we have implemented only some basic features\n"
-	     "* just to show you what you can do with the library. Feel \n"
-	     "* free to extend it and send us the patches for inclusion\n"
-	     "------------------------------------------------------------\n\n");
+      // printf("\n-----------------------------------------------------------\n"
+	    //  "* NOTE: This is demo app to show *some* nDPI features.\n"
+	    //  "* In this demo we have implemented only some basic features\n"
+	    //  "* just to show you what you can do with the library. Feel \n"
+	    //  "* free to extend it and send us the patches for inclusion\n"
+	    //  "------------------------------------------------------------\n\n");
 
-      printf("Using nDPI (%s) [%d thread(s)]\n", ndpi_revision(), num_threads);
+      // printf("Using nDPI (%s) [%d thread(s)]\n", ndpi_revision(), num_threads);
     }
 
     signal(SIGINT, sigproc);
